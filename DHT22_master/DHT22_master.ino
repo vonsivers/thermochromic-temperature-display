@@ -23,15 +23,24 @@
 // as the current DHT reading algorithm adjusts itself to work on faster procs.
 DHT dht(DHTPIN, DHTTYPE);
 
-// time (s) between sensor readouts
-const unsigned long delayRead = 60;
-// time (s) for changing between temp and humidity display
-//const unsigned long delayHum = 20;
+// time (s) between sensor readouts and duration of heating and cooling periods
+// temp read out -> delay_heat -> delay_cool -> delayRead -> hum read out -> delay_heat -> delay_cool -> delay_read ...
+const unsigned long delayRead = 35;
+const unsigned long duration_heat = 25;
+const unsigned long duration_cool = 0;
 
-float humidity=20;         // humidity
-float temperature=10;      // temperature
+// TEC duty cycle (-255 .. 255) for heating/cooling
+const int duty_heat = 30;
+const int duty_cool = -30;
 
-uint8_t digit[2];
+// current state of TEC
+// stateTEC[address][channel]
+int stateTEC[5][4] = {{0}};
+
+float humidity;         // humidity
+float temperature;      // temperature
+
+uint8_t digit[2];         // digits to display
 
 //
 //      A
@@ -68,25 +77,17 @@ const uint8_t digitToSegment[] = {
   0b00001011     // G -> 2,3
   };
 
-  // I2C adress and channel for segments of digit 1
+// I2C adress and channel for segments of digit 1
 // first two bits are channel nr., last 6 bits are I2C address
   const uint8_t segmentOneToAddressCh[] = {
- // IIIIIICC
-    0b00000100,    // A -> 1,0
-    0b00000101,    // B -> 1,1
-    0b00000110,    // C -> 1,2
-    0b00000111,    // D -> 1,3
-    0b00001000,    // E -> 2,0
-    0b00001001,    // F -> 2,1
-    0b00001010     // G -> 2,2
-    
-  //0b00001000,    // A -> 2,0
-  //0b00000110,    // B -> 1,2
-  //0b00000111,    // C -> 1,3
-  //0b00001100,    // D -> 3,0
-  //0b00000101,    // E -> 1,1
-  //0b00000100,    // F -> 1,0
-  //0b00001010     // G -> 2,2
+//  IIIIIICC    
+  0b00001000,    // A -> 2,0
+  0b00000110,    // B -> 1,2
+  0b00000111,    // C -> 1,3
+  0b00001100,    // D -> 3,0
+  0b00000101,    // E -> 1,1
+  0b00000100,    // F -> 1,0
+  0b00001010     // G -> 2,2
   };
 
 void setup() {
@@ -100,28 +101,23 @@ void setup() {
 }
 
 void loop() {
-
   
-  //temperature = random(10,99);
-  //humidity = random(10,99);
+  /*
+  temperature = random(18,33);
+  humidity = random(20,80);
   
-  if (temperature == 110) temperature = 10;
-  if (humidity == 100) humidity = 0;
-  //Serial.print(F("Humidity: "));
-  //Serial.print(humidity);
-  //Serial.print(F("%  Temperature: "));
+  Serial.print(F("Humidity: "));
+  Serial.print(humidity);
+  Serial.print(F("%  Temperature: "));
   Serial.print(temperature);
   Serial.println(F("°C "));
+  */
 
-  //readDHT();
+  readDHT();
   displayTemp();
-  //delay(delayHum*1000);
   delay(delayRead*1000);
   displayHum();
   delay(delayRead*1000);
-
-  humidity += 20;
-  temperature += 20;
   
 }
 
@@ -145,15 +141,23 @@ void readDHT() {
 }
 
 void displayTemp() {
-  int temp = (int)(temperature);
+  int temp = round(temperature);
   displayNum(temp);
   displayDeg();
+  delay(duration_heat*1000);
+  stopHeating();
+  delay(duration_cool*1000);
+  stopCooling();
 }
 
 void displayHum() {
-  int hum = (int)(humidity);
+  int hum = round(humidity);
   displayNum(hum);
   displayPer();
+  delay(duration_heat*1000);
+  stopHeating();
+  delay(duration_cool*1000);
+  stopCooling();
 }
 
 
@@ -164,14 +168,15 @@ void displayNum(int number) {
   Serial.print(F("* displaying number "));
   Serial.println(number);
 
-  // convert number to digits
+  // separate digits
   getDigits(number);
 
+  // display both digits
   displayDigit(0);
   displayDigit(1);
 }
 
-// display digit 0 or 1
+// display first (dig=1) or second (dig=0) digit
 //
 void displayDigit(uint8_t dig) {
   
@@ -200,7 +205,7 @@ void displayDigit(uint8_t dig) {
   for(uint8_t i = 0; i < 7; i++) {
     
     uint8_t addressCh;
-    uint8_t isActive = 0;
+    int duty;
     
     // get I2C address and channel
     if (dig == 0) {
@@ -214,7 +219,10 @@ void displayDigit(uint8_t dig) {
     
     // check if segment is active
     if (seg & 0x01) {
-      isActive = 1;
+      duty = duty_heat;
+    }
+    else {
+      duty = duty_cool;
     }
 
     // separate I2C address and channel nr.
@@ -227,8 +235,9 @@ void displayDigit(uint8_t dig) {
     Serial.println(channel);
     
     // send data
-    sendData(address, channel, isActive);
-   
+    sendData(address, channel, duty);
+
+   // go to next bit
     seg = seg >> 1; 
   }
 }
@@ -236,35 +245,68 @@ void displayDigit(uint8_t dig) {
 // displays ° symbol
 //
 void displayDeg() {
-  sendData(0, 0, 1); 
-  sendData(0, 1, 0);
-  sendData(0, 2, 0);
-  sendData(0, 3, 0);
+  sendData(0, 0, duty_heat/5);    // dot 1, more sensitive foil
+  sendData(0, 1, duty_cool);      // dot 2, normal foil
+  //sendData(0, 2, duty_cool*2);   // dash lower TEC, more sensitive foil, bad thermal coupling!->disabled
+  sendData(0, 3, duty_cool*2);   // dash upper TEC, more sensitive foil
 }
 
 // displays % symbol
 //
 void displayPer() {
-  sendData(0, 0, 1); 
-  sendData(0, 1, 1);
-  sendData(0, 2, 1);
-  sendData(0, 3, 1);
+  sendData(0, 0, duty_heat/6); 
+  sendData(0, 1, duty_heat); 
+  sendData(0, 2, duty_heat/7);
+  sendData(0, 3, duty_heat/6);
+}
+
+// stop heating
+//
+void stopHeating() {
+  for(int address=0; address<5; address++) {
+    for(int channel=0; channel<4; channel++) {
+      if(stateTEC[address][channel]>0) sendData(address,channel,0);
+    }
+  }
+}
+
+// stop cooling
+//
+void stopCooling() {
+  for(int address=0; address<5; address++) {
+    for(int channel=0; channel<4; channel++) {
+      if(stateTEC[address][channel]<0) sendData(address,channel,0);
+    }
+  }
+}
+
+// stop cooling TEC with bad coupling
+//
+void stopCoolingBadTEC() {
+  if(stateTEC[0][2]<0) sendData(0,2,0);
 }
 
 // transmitts data via I2C
 //
-void sendData(uint8_t address, uint8_t channel, uint8_t state) {
+void sendData(uint8_t address, uint8_t channel, int duty) {
  Wire.beginTransmission(address); // transmit to device 
   Wire.write(channel); 
-  Wire.write(state);              
+  Wire.write(duty);              
   Wire.endTransmission();    // stop transmitting
 
-  Serial.print(F("****** Sending ... ch: "));
+  Serial.print(F("****** Sending to I2C address: "));
+  Serial.print(address);
+  Serial.print(F(", ch: "));
   Serial.print(channel);
-  Serial.print(F(", state: "));
-  Serial.println(state);
+  Serial.print(F(", duty cycle: "));
+  Serial.println(duty);
+
+  // update TEC state
+  stateTEC[address][channel] = duty;
 }
 
+// get individual digits of two digit number
+//
 void getDigits(int number) {
   if(number>99) return;
   digit[0] = number % 10;
